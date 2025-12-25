@@ -467,7 +467,7 @@ setup_symlink() {
         return
     fi
     
-    local SYMLINK_PATH="/usr/local/bin/postgres-backup"
+    local SYMLINK_PATH="/usr/local/bin/pg-backup"
     
     if [[ -L "$SYMLINK_PATH" && "$(readlink -f "$SYMLINK_PATH")" == "$SCRIPT_PATH" ]]; then
         return 0
@@ -475,7 +475,7 @@ setup_symlink() {
     
     rm -f "$SYMLINK_PATH"
     if ln -s "$SCRIPT_PATH" "$SYMLINK_PATH" 2>/dev/null; then
-        print_msg "SUCCESS" "Команда ${BOLD}postgres-backup${RESET} доступна"
+        print_msg "SUCCESS" "Команда ${BOLD}pg-backup${RESET} доступна"
     fi
 }
 
