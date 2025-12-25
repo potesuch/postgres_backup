@@ -145,6 +145,7 @@ send_telegram_file() {
 
 create_backup() {
     print_msg "INFO" "Создание бэкапа БД..."
+    print_msg "INFO" "pg_dumpall НЕ блокирует БД, работа продолжается"
     
     if ! docker inspect "$DB_CONTAINER" > /dev/null 2>&1; then
         print_msg "ERROR" "Контейнер $DB_CONTAINER не найден"
@@ -165,7 +166,555 @@ create_backup() {
     
     local size=$(du -h "$backup_file" | awk '{print $1}')
     local date=$(date +'%Y-%m-%d %H:%M:%S')
-    local caption=$'💾 *Бэкап PostgreSQL*\n📦 *Контейнер:* '"$DB_CONTAINER"$'\n📏 *Размер:* '"$size"$'\n📅 *Дата:* '"$date"
+    local caption=
+
+setup_cron() {
+    if [[ $EUID -ne 0 ]]; then
+        print_msg "ERROR" "Требуются права root для настройки cron"
+        read -rp "Нажмите Enter..."
+        return
+    fi
+    
+    while true; do
+        clear
+        echo -e "${GREEN}${BOLD}Настройка автоматического бэкапа${RESET}"
+        echo ""
+        
+        if [[ -n "$CRON_TIME" ]]; then
+            print_msg "INFO" "Текущая настройка: ${BOLD}$CRON_TIME${RESET}"
+        else
+            print_msg "INFO" "Автоматический бэкап ${BOLD}выключен${RESET}"
+        fi
+        
+        echo ""
+        echo "1. Ежечасно"
+        echo "2. Ежедневно"
+        echo "3. Выбрать время (например: 08:00 14:00 20:00)"
+        echo "4. Выключить автобэкап"
+        echo ""
+        echo "0. Назад"
+        echo ""
+        
+        read -rp "${GREEN}[?]${RESET} Выберите: " choice
+        echo ""
+        
+        case $choice in
+            1)
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH backup" | crontab -
+                (crontab -l 2>/dev/null; echo "@hourly $SCRIPT_PATH backup >> /var/log/pg_backup.log 2>&1") | crontab -
+                CRON_TIME="@hourly"
+                save_config
+                print_msg "SUCCESS" "Установлен ежечасный бэкап"
+                ;;
+            2)
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH backup" | crontab -
+                (crontab -l 2>/dev/null; echo "@daily $SCRIPT_PATH backup >> /var/log/pg_backup.log 2>&1") | crontab -
+                CRON_TIME="@daily"
+                save_config
+                print_msg "SUCCESS" "Установлен ежедневный бэкап"
+                ;;
+            3)
+                echo "Введите время через пробел (например: 08:00 14:00 20:00):"
+                read -rp "Время: " times
+                
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH backup" | crontab -
+                
+                IFS=' ' read -ra arr <<< "$times"
+                for t in "${arr[@]}"; do
+                    if [[ $t =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
+                        local hour=$((10#${BASH_REMATCH[1]}))
+                        local min=$((10#${BASH_REMATCH[2]}))
+                        (crontab -l 2>/dev/null; echo "$min $hour * * * $SCRIPT_PATH backup >> /var/log/pg_backup.log 2>&1") | crontab -
+                    fi
+                done
+                
+                CRON_TIME="$times"
+                save_config
+                print_msg "SUCCESS" "Установлено время: $times"
+                ;;
+            4)
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH backup" | crontab -
+                CRON_TIME=""
+                save_config
+                print_msg "SUCCESS" "Автобэкап выключен"
+                ;;
+            0) break ;;
+            *) print_msg "ERROR" "Неверный выбор" ;;
+        esac
+        
+        echo ""
+        read -rp "Нажмите Enter..."
+    done
+}
+
+edit_settings() {
+    while true; do
+        clear
+        echo -e "${GREEN}${BOLD}Настройки${RESET}"
+        echo ""
+        echo "1. Bot Token: ${BOLD}${BOT_TOKEN:0:10}...${RESET}"
+        echo "2. Chat ID: ${BOLD}$CHAT_ID${RESET}"
+        echo "3. Контейнер БД: ${BOLD}$DB_CONTAINER${RESET}"
+        echo "4. Пользователь БД: ${BOLD}$DB_USER${RESET}"
+        echo ""
+        echo "0. Назад"
+        echo ""
+        
+        read -rp "${GREEN}[?]${RESET} Что изменить: " choice
+        echo ""
+        
+        case $choice in
+            1)
+                read -rp "Новый Bot Token: " BOT_TOKEN
+                save_config
+                print_msg "SUCCESS" "Token обновлен"
+                ;;
+            2)
+                read -rp "Новый Chat ID: " CHAT_ID
+                save_config
+                print_msg "SUCCESS" "Chat ID обновлен"
+                ;;
+            3)
+                read -rp "Название контейнера: " DB_CONTAINER
+                save_config
+                print_msg "SUCCESS" "Контейнер обновлен"
+                ;;
+            4)
+                read -rp "Имя пользователя БД: " DB_USER
+                save_config
+                print_msg "SUCCESS" "Пользователь обновлен"
+                ;;
+            0) break ;;
+            *) print_msg "ERROR" "Неверный выбор" ;;
+        esac
+        
+        echo ""
+        read -rp "Нажмите Enter..."
+    done
+}
+
+setup_symlink() {
+    if [[ "$EUID" -ne 0 ]]; then
+        return
+    fi
+    
+    local SYMLINK_PATH="/usr/local/bin/postgres-backup"
+    
+    if [[ -L "$SYMLINK_PATH" && "$(readlink -f "$SYMLINK_PATH")" == "$SCRIPT_PATH" ]]; then
+        return 0
+    fi
+    
+    rm -f "$SYMLINK_PATH"
+    if ln -s "$SCRIPT_PATH" "$SYMLINK_PATH" 2>/dev/null; then
+        print_msg "SUCCESS" "Команда ${BOLD}postgres-backup${RESET} доступна из любой точки системы"
+    fi
+}
+
+main_menu() {
+    while true; do
+        clear
+        echo -e "${GREEN}${BOLD}PostgreSQL Backup Tool v$VERSION${RESET}"
+        echo ""
+        echo "1. Создать бэкап сейчас"
+        echo "2. Восстановить из бэкапа"
+        echo "3. Настроить автоматический бэкап"
+        echo "4. Изменить настройки"
+        echo ""
+        echo "0. Выход"
+        echo ""
+        
+        read -rp "${GREEN}[?]${RESET} Выберите: " choice
+        echo ""
+        
+        case $choice in
+            1) 
+                create_backup
+                read -rp "Нажмите Enter..."
+                ;;
+            2) restore_backup ;;
+            3) setup_cron ;;
+            4) edit_settings ;;
+            0) exit 0 ;;
+            *) 
+                print_msg "ERROR" "Неверный выбор"
+                read -rp "Нажмите Enter..."
+                ;;
+        esac
+    done
+}
+
+# Проверка jq
+if ! command -v jq &> /dev/null; then
+    print_msg "INFO" "Установка jq..."
+    apt-get update -qq && apt-get install -y jq -qq
+fi
+
+# Запуск
+if [[ -z "$1" ]]; then
+    load_config
+    setup_symlink
+    main_menu
+elif [[ "$1" == "backup" ]]; then
+    load_config
+    create_backup
+elif [[ "$1" == "restore" ]]; then
+    load_config
+    restore_backup
+else
+    print_msg "ERROR" "Использование: $0 [backup|restore]"
+    exit 1
+fi
+💾 *Бэкап PostgreSQL*\n📦 *Контейнер:* '"$DB_CONTAINER"
+
+setup_cron() {
+    if [[ $EUID -ne 0 ]]; then
+        print_msg "ERROR" "Требуются права root для настройки cron"
+        read -rp "Нажмите Enter..."
+        return
+    fi
+    
+    while true; do
+        clear
+        echo -e "${GREEN}${BOLD}Настройка автоматического бэкапа${RESET}"
+        echo ""
+        
+        if [[ -n "$CRON_TIME" ]]; then
+            print_msg "INFO" "Текущая настройка: ${BOLD}$CRON_TIME${RESET}"
+        else
+            print_msg "INFO" "Автоматический бэкап ${BOLD}выключен${RESET}"
+        fi
+        
+        echo ""
+        echo "1. Ежечасно"
+        echo "2. Ежедневно"
+        echo "3. Выбрать время (например: 08:00 14:00 20:00)"
+        echo "4. Выключить автобэкап"
+        echo ""
+        echo "0. Назад"
+        echo ""
+        
+        read -rp "${GREEN}[?]${RESET} Выберите: " choice
+        echo ""
+        
+        case $choice in
+            1)
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH backup" | crontab -
+                (crontab -l 2>/dev/null; echo "@hourly $SCRIPT_PATH backup >> /var/log/pg_backup.log 2>&1") | crontab -
+                CRON_TIME="@hourly"
+                save_config
+                print_msg "SUCCESS" "Установлен ежечасный бэкап"
+                ;;
+            2)
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH backup" | crontab -
+                (crontab -l 2>/dev/null; echo "@daily $SCRIPT_PATH backup >> /var/log/pg_backup.log 2>&1") | crontab -
+                CRON_TIME="@daily"
+                save_config
+                print_msg "SUCCESS" "Установлен ежедневный бэкап"
+                ;;
+            3)
+                echo "Введите время через пробел (например: 08:00 14:00 20:00):"
+                read -rp "Время: " times
+                
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH backup" | crontab -
+                
+                IFS=' ' read -ra arr <<< "$times"
+                for t in "${arr[@]}"; do
+                    if [[ $t =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
+                        local hour=$((10#${BASH_REMATCH[1]}))
+                        local min=$((10#${BASH_REMATCH[2]}))
+                        (crontab -l 2>/dev/null; echo "$min $hour * * * $SCRIPT_PATH backup >> /var/log/pg_backup.log 2>&1") | crontab -
+                    fi
+                done
+                
+                CRON_TIME="$times"
+                save_config
+                print_msg "SUCCESS" "Установлено время: $times"
+                ;;
+            4)
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH backup" | crontab -
+                CRON_TIME=""
+                save_config
+                print_msg "SUCCESS" "Автобэкап выключен"
+                ;;
+            0) break ;;
+            *) print_msg "ERROR" "Неверный выбор" ;;
+        esac
+        
+        echo ""
+        read -rp "Нажмите Enter..."
+    done
+}
+
+edit_settings() {
+    while true; do
+        clear
+        echo -e "${GREEN}${BOLD}Настройки${RESET}"
+        echo ""
+        echo "1. Bot Token: ${BOLD}${BOT_TOKEN:0:10}...${RESET}"
+        echo "2. Chat ID: ${BOLD}$CHAT_ID${RESET}"
+        echo "3. Контейнер БД: ${BOLD}$DB_CONTAINER${RESET}"
+        echo "4. Пользователь БД: ${BOLD}$DB_USER${RESET}"
+        echo ""
+        echo "0. Назад"
+        echo ""
+        
+        read -rp "${GREEN}[?]${RESET} Что изменить: " choice
+        echo ""
+        
+        case $choice in
+            1)
+                read -rp "Новый Bot Token: " BOT_TOKEN
+                save_config
+                print_msg "SUCCESS" "Token обновлен"
+                ;;
+            2)
+                read -rp "Новый Chat ID: " CHAT_ID
+                save_config
+                print_msg "SUCCESS" "Chat ID обновлен"
+                ;;
+            3)
+                read -rp "Название контейнера: " DB_CONTAINER
+                save_config
+                print_msg "SUCCESS" "Контейнер обновлен"
+                ;;
+            4)
+                read -rp "Имя пользователя БД: " DB_USER
+                save_config
+                print_msg "SUCCESS" "Пользователь обновлен"
+                ;;
+            0) break ;;
+            *) print_msg "ERROR" "Неверный выбор" ;;
+        esac
+        
+        echo ""
+        read -rp "Нажмите Enter..."
+    done
+}
+
+main_menu() {
+    while true; do
+        clear
+        echo -e "${GREEN}${BOLD}PostgreSQL Backup Tool v$VERSION${RESET}"
+        echo ""
+        echo "1. Создать бэкап сейчас"
+        echo "2. Настроить автоматический бэкап"
+        echo "3. Изменить настройки"
+        echo ""
+        echo "0. Выход"
+        echo ""
+        
+        read -rp "${GREEN}[?]${RESET} Выберите: " choice
+        echo ""
+        
+        case $choice in
+            1) 
+                create_backup
+                read -rp "Нажмите Enter..."
+                ;;
+            2) setup_cron ;;
+            3) edit_settings ;;
+            0) exit 0 ;;
+            *) 
+                print_msg "ERROR" "Неверный выбор"
+                read -rp "Нажмите Enter..."
+                ;;
+        esac
+    done
+}
+
+# Проверка jq
+if ! command -v jq &> /dev/null; then
+    print_msg "INFO" "Установка jq..."
+    apt-get update -qq && apt-get install -y jq -qq
+fi
+
+# Запуск
+if [[ -z "$1" ]]; then
+    load_config
+    main_menu
+elif [[ "$1" == "backup" ]]; then
+    load_config
+    create_backup
+else
+    print_msg "ERROR" "Использование: $0 [backup]"
+    exit 1
+fi
+\n📏 *Размер:* '"$size"
+
+setup_cron() {
+    if [[ $EUID -ne 0 ]]; then
+        print_msg "ERROR" "Требуются права root для настройки cron"
+        read -rp "Нажмите Enter..."
+        return
+    fi
+    
+    while true; do
+        clear
+        echo -e "${GREEN}${BOLD}Настройка автоматического бэкапа${RESET}"
+        echo ""
+        
+        if [[ -n "$CRON_TIME" ]]; then
+            print_msg "INFO" "Текущая настройка: ${BOLD}$CRON_TIME${RESET}"
+        else
+            print_msg "INFO" "Автоматический бэкап ${BOLD}выключен${RESET}"
+        fi
+        
+        echo ""
+        echo "1. Ежечасно"
+        echo "2. Ежедневно"
+        echo "3. Выбрать время (например: 08:00 14:00 20:00)"
+        echo "4. Выключить автобэкап"
+        echo ""
+        echo "0. Назад"
+        echo ""
+        
+        read -rp "${GREEN}[?]${RESET} Выберите: " choice
+        echo ""
+        
+        case $choice in
+            1)
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH backup" | crontab -
+                (crontab -l 2>/dev/null; echo "@hourly $SCRIPT_PATH backup >> /var/log/pg_backup.log 2>&1") | crontab -
+                CRON_TIME="@hourly"
+                save_config
+                print_msg "SUCCESS" "Установлен ежечасный бэкап"
+                ;;
+            2)
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH backup" | crontab -
+                (crontab -l 2>/dev/null; echo "@daily $SCRIPT_PATH backup >> /var/log/pg_backup.log 2>&1") | crontab -
+                CRON_TIME="@daily"
+                save_config
+                print_msg "SUCCESS" "Установлен ежедневный бэкап"
+                ;;
+            3)
+                echo "Введите время через пробел (например: 08:00 14:00 20:00):"
+                read -rp "Время: " times
+                
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH backup" | crontab -
+                
+                IFS=' ' read -ra arr <<< "$times"
+                for t in "${arr[@]}"; do
+                    if [[ $t =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
+                        local hour=$((10#${BASH_REMATCH[1]}))
+                        local min=$((10#${BASH_REMATCH[2]}))
+                        (crontab -l 2>/dev/null; echo "$min $hour * * * $SCRIPT_PATH backup >> /var/log/pg_backup.log 2>&1") | crontab -
+                    fi
+                done
+                
+                CRON_TIME="$times"
+                save_config
+                print_msg "SUCCESS" "Установлено время: $times"
+                ;;
+            4)
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH backup" | crontab -
+                CRON_TIME=""
+                save_config
+                print_msg "SUCCESS" "Автобэкап выключен"
+                ;;
+            0) break ;;
+            *) print_msg "ERROR" "Неверный выбор" ;;
+        esac
+        
+        echo ""
+        read -rp "Нажмите Enter..."
+    done
+}
+
+edit_settings() {
+    while true; do
+        clear
+        echo -e "${GREEN}${BOLD}Настройки${RESET}"
+        echo ""
+        echo "1. Bot Token: ${BOLD}${BOT_TOKEN:0:10}...${RESET}"
+        echo "2. Chat ID: ${BOLD}$CHAT_ID${RESET}"
+        echo "3. Контейнер БД: ${BOLD}$DB_CONTAINER${RESET}"
+        echo "4. Пользователь БД: ${BOLD}$DB_USER${RESET}"
+        echo ""
+        echo "0. Назад"
+        echo ""
+        
+        read -rp "${GREEN}[?]${RESET} Что изменить: " choice
+        echo ""
+        
+        case $choice in
+            1)
+                read -rp "Новый Bot Token: " BOT_TOKEN
+                save_config
+                print_msg "SUCCESS" "Token обновлен"
+                ;;
+            2)
+                read -rp "Новый Chat ID: " CHAT_ID
+                save_config
+                print_msg "SUCCESS" "Chat ID обновлен"
+                ;;
+            3)
+                read -rp "Название контейнера: " DB_CONTAINER
+                save_config
+                print_msg "SUCCESS" "Контейнер обновлен"
+                ;;
+            4)
+                read -rp "Имя пользователя БД: " DB_USER
+                save_config
+                print_msg "SUCCESS" "Пользователь обновлен"
+                ;;
+            0) break ;;
+            *) print_msg "ERROR" "Неверный выбор" ;;
+        esac
+        
+        echo ""
+        read -rp "Нажмите Enter..."
+    done
+}
+
+main_menu() {
+    while true; do
+        clear
+        echo -e "${GREEN}${BOLD}PostgreSQL Backup Tool v$VERSION${RESET}"
+        echo ""
+        echo "1. Создать бэкап сейчас"
+        echo "2. Настроить автоматический бэкап"
+        echo "3. Изменить настройки"
+        echo ""
+        echo "0. Выход"
+        echo ""
+        
+        read -rp "${GREEN}[?]${RESET} Выберите: " choice
+        echo ""
+        
+        case $choice in
+            1) 
+                create_backup
+                read -rp "Нажмите Enter..."
+                ;;
+            2) setup_cron ;;
+            3) edit_settings ;;
+            0) exit 0 ;;
+            *) 
+                print_msg "ERROR" "Неверный выбор"
+                read -rp "Нажмите Enter..."
+                ;;
+        esac
+    done
+}
+
+# Проверка jq
+if ! command -v jq &> /dev/null; then
+    print_msg "INFO" "Установка jq..."
+    apt-get update -qq && apt-get install -y jq -qq
+fi
+
+# Запуск
+if [[ -z "$1" ]]; then
+    load_config
+    main_menu
+elif [[ "$1" == "backup" ]]; then
+    load_config
+    create_backup
+else
+    print_msg "ERROR" "Использование: $0 [backup]"
+    exit 1
+fi
+\n📅 *Дата:* '"$date"
     
     print_msg "INFO" "Отправка в Telegram..."
     if send_telegram_file "$backup_file" "$caption"; then
@@ -177,6 +726,249 @@ create_backup() {
     # Удаление старых бэкапов
     find "$BACKUP_DIR" -name "db_backup_*.sql.gz" -mtime +$RETAIN_DAYS -delete
     print_msg "INFO" "Старые бэкапы удалены (старше $RETAIN_DAYS дней)"
+}
+
+restore_backup() {
+    clear
+    echo -e "${GREEN}${BOLD}Восстановление из бэкапа${RESET}"
+    echo ""
+    
+    if ! compgen -G "$BACKUP_DIR/db_backup_*.sql.gz" > /dev/null; then
+        print_msg "ERROR" "Бэкапы не найдены в $BACKUP_DIR"
+        read -rp "Нажмите Enter..."
+        return
+    fi
+    
+    readarray -t backups < <(find "$BACKUP_DIR" -name "db_backup_*.sql.gz" -printf "%T@ %p\n" | sort -nr | cut -d' ' -f2-)
+    
+    echo "Доступные бэкапы:"
+    local i=1
+    for file in "${backups[@]}"; do
+        local size=$(du -h "$file" | awk '{print $1}')
+        echo " $i) $(basename "$file") [$size]"
+        i=$((i+1))
+    done
+    echo ""
+    echo " 0) Отмена"
+    echo ""
+    
+    read -rp "${GREEN}[?]${RESET} Выберите бэкап: " choice
+    
+    if [[ "$choice" == "0" || -z "$choice" ]]; then
+        return
+    fi
+    
+    local selected="${backups[$((choice-1))]}"
+    
+    if [[ ! -f "$selected" ]]; then
+        print_msg "ERROR" "Неверный выбор"
+        read -rp "Нажмите Enter..."
+        return
+    fi
+    
+    echo ""
+    print_msg "WARN" "${YELLOW}ВНИМАНИЕ!${RESET} Все данные в БД будут удалены!"
+    read -rp "Введите ${GREEN}${BOLD}Y${RESET} для подтверждения: " confirm
+    
+    if [[ "${confirm,,}" != "y" ]]; then
+        print_msg "INFO" "Отменено"
+        read -rp "Нажмите Enter..."
+        return
+    fi
+    
+    echo ""
+    print_msg "INFO" "Восстановление из $(basename "$selected")..."
+    
+    local temp_file="${selected%.gz}"
+    gunzip -c "$selected" > "$temp_file"
+    
+    if docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d postgres < "$temp_file" 2>&1 | grep -v "already exists\|does not exist"; then
+        print_msg "SUCCESS" "База данных восстановлена!"
+        send_telegram 
+
+setup_cron() {
+    if [[ $EUID -ne 0 ]]; then
+        print_msg "ERROR" "Требуются права root для настройки cron"
+        read -rp "Нажмите Enter..."
+        return
+    fi
+    
+    while true; do
+        clear
+        echo -e "${GREEN}${BOLD}Настройка автоматического бэкапа${RESET}"
+        echo ""
+        
+        if [[ -n "$CRON_TIME" ]]; then
+            print_msg "INFO" "Текущая настройка: ${BOLD}$CRON_TIME${RESET}"
+        else
+            print_msg "INFO" "Автоматический бэкап ${BOLD}выключен${RESET}"
+        fi
+        
+        echo ""
+        echo "1. Ежечасно"
+        echo "2. Ежедневно"
+        echo "3. Выбрать время (например: 08:00 14:00 20:00)"
+        echo "4. Выключить автобэкап"
+        echo ""
+        echo "0. Назад"
+        echo ""
+        
+        read -rp "${GREEN}[?]${RESET} Выберите: " choice
+        echo ""
+        
+        case $choice in
+            1)
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH backup" | crontab -
+                (crontab -l 2>/dev/null; echo "@hourly $SCRIPT_PATH backup >> /var/log/pg_backup.log 2>&1") | crontab -
+                CRON_TIME="@hourly"
+                save_config
+                print_msg "SUCCESS" "Установлен ежечасный бэкап"
+                ;;
+            2)
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH backup" | crontab -
+                (crontab -l 2>/dev/null; echo "@daily $SCRIPT_PATH backup >> /var/log/pg_backup.log 2>&1") | crontab -
+                CRON_TIME="@daily"
+                save_config
+                print_msg "SUCCESS" "Установлен ежедневный бэкап"
+                ;;
+            3)
+                echo "Введите время через пробел (например: 08:00 14:00 20:00):"
+                read -rp "Время: " times
+                
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH backup" | crontab -
+                
+                IFS=' ' read -ra arr <<< "$times"
+                for t in "${arr[@]}"; do
+                    if [[ $t =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
+                        local hour=$((10#${BASH_REMATCH[1]}))
+                        local min=$((10#${BASH_REMATCH[2]}))
+                        (crontab -l 2>/dev/null; echo "$min $hour * * * $SCRIPT_PATH backup >> /var/log/pg_backup.log 2>&1") | crontab -
+                    fi
+                done
+                
+                CRON_TIME="$times"
+                save_config
+                print_msg "SUCCESS" "Установлено время: $times"
+                ;;
+            4)
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH backup" | crontab -
+                CRON_TIME=""
+                save_config
+                print_msg "SUCCESS" "Автобэкап выключен"
+                ;;
+            0) break ;;
+            *) print_msg "ERROR" "Неверный выбор" ;;
+        esac
+        
+        echo ""
+        read -rp "Нажмите Enter..."
+    done
+}
+
+edit_settings() {
+    while true; do
+        clear
+        echo -e "${GREEN}${BOLD}Настройки${RESET}"
+        echo ""
+        echo "1. Bot Token: ${BOLD}${BOT_TOKEN:0:10}...${RESET}"
+        echo "2. Chat ID: ${BOLD}$CHAT_ID${RESET}"
+        echo "3. Контейнер БД: ${BOLD}$DB_CONTAINER${RESET}"
+        echo "4. Пользователь БД: ${BOLD}$DB_USER${RESET}"
+        echo ""
+        echo "0. Назад"
+        echo ""
+        
+        read -rp "${GREEN}[?]${RESET} Что изменить: " choice
+        echo ""
+        
+        case $choice in
+            1)
+                read -rp "Новый Bot Token: " BOT_TOKEN
+                save_config
+                print_msg "SUCCESS" "Token обновлен"
+                ;;
+            2)
+                read -rp "Новый Chat ID: " CHAT_ID
+                save_config
+                print_msg "SUCCESS" "Chat ID обновлен"
+                ;;
+            3)
+                read -rp "Название контейнера: " DB_CONTAINER
+                save_config
+                print_msg "SUCCESS" "Контейнер обновлен"
+                ;;
+            4)
+                read -rp "Имя пользователя БД: " DB_USER
+                save_config
+                print_msg "SUCCESS" "Пользователь обновлен"
+                ;;
+            0) break ;;
+            *) print_msg "ERROR" "Неверный выбор" ;;
+        esac
+        
+        echo ""
+        read -rp "Нажмите Enter..."
+    done
+}
+
+main_menu() {
+    while true; do
+        clear
+        echo -e "${GREEN}${BOLD}PostgreSQL Backup Tool v$VERSION${RESET}"
+        echo ""
+        echo "1. Создать бэкап сейчас"
+        echo "2. Настроить автоматический бэкап"
+        echo "3. Изменить настройки"
+        echo ""
+        echo "0. Выход"
+        echo ""
+        
+        read -rp "${GREEN}[?]${RESET} Выберите: " choice
+        echo ""
+        
+        case $choice in
+            1) 
+                create_backup
+                read -rp "Нажмите Enter..."
+                ;;
+            2) setup_cron ;;
+            3) edit_settings ;;
+            0) exit 0 ;;
+            *) 
+                print_msg "ERROR" "Неверный выбор"
+                read -rp "Нажмите Enter..."
+                ;;
+        esac
+    done
+}
+
+# Проверка jq
+if ! command -v jq &> /dev/null; then
+    print_msg "INFO" "Установка jq..."
+    apt-get update -qq && apt-get install -y jq -qq
+fi
+
+# Запуск
+if [[ -z "$1" ]]; then
+    load_config
+    main_menu
+elif [[ "$1" == "backup" ]]; then
+    load_config
+    create_backup
+else
+    print_msg "ERROR" "Использование: $0 [backup]"
+    exit 1
+fi
+✅ *Восстановление завершено*\n📦 Контейнер: '"$DB_CONTAINER"
+    else
+        print_msg "ERROR" "Ошибка восстановления"
+        send_telegram "❌ Ошибка восстановления БД"
+    fi
+    
+    rm -f "$temp_file"
+    
+    echo ""
+    read -rp "Нажмите Enter..."
 }
 
 setup_cron() {
@@ -335,23 +1127,6 @@ main_menu() {
     done
 }
 
-setup_symlink() {
-    if [[ "$EUID" -ne 0 ]]; then
-        return
-    fi
-    
-    local SYMLINK_PATH="/usr/local/bin/postgres-backup"
-    
-    if [[ -L "$SYMLINK_PATH" && "$(readlink -f "$SYMLINK_PATH")" == "$SCRIPT_PATH" ]]; then
-        return 0
-    fi
-    
-    rm -f "$SYMLINK_PATH"
-    if ln -s "$SCRIPT_PATH" "$SYMLINK_PATH" 2>/dev/null; then
-        print_msg "SUCCESS" "Команда ${BOLD}postgres-backup${RESET} доступна из любой точки системы"
-    fi
-}
-
 # Проверка jq
 if ! command -v jq &> /dev/null; then
     print_msg "INFO" "Установка jq..."
@@ -361,7 +1136,6 @@ fi
 # Запуск
 if [[ -z "$1" ]]; then
     load_config
-    setup_symlink
     main_menu
 elif [[ "$1" == "backup" ]]; then
     load_config
