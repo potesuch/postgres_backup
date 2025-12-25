@@ -335,6 +335,23 @@ main_menu() {
     done
 }
 
+setup_symlink() {
+    if [[ "$EUID" -ne 0 ]]; then
+        return
+    fi
+    
+    local SYMLINK_PATH="/usr/local/bin/postgres-backup"
+    
+    if [[ -L "$SYMLINK_PATH" && "$(readlink -f "$SYMLINK_PATH")" == "$SCRIPT_PATH" ]]; then
+        return 0
+    fi
+    
+    rm -f "$SYMLINK_PATH"
+    if ln -s "$SCRIPT_PATH" "$SYMLINK_PATH" 2>/dev/null; then
+        print_msg "SUCCESS" "Команда ${BOLD}postgres-backup${RESET} доступна из любой точки системы"
+    fi
+}
+
 # Проверка jq
 if ! command -v jq &> /dev/null; then
     print_msg "INFO" "Установка jq..."
@@ -344,6 +361,7 @@ fi
 # Запуск
 if [[ -z "$1" ]]; then
     load_config
+    setup_symlink
     main_menu
 elif [[ "$1" == "backup" ]]; then
     load_config
