@@ -7,6 +7,8 @@ INSTALL_DIR="/opt/pg-backup"
 BACKUP_DIR="$INSTALL_DIR/backups"
 CONFIG_FILE="$INSTALL_DIR/config.env"
 SCRIPT_PATH="$INSTALL_DIR/pg-backup.sh"
+SCRIPT_RUN_PATH="$(realpath "$0")"
+SCRIPT_REPO_URL="https://raw.githubusercontent.com/potesuch/postgres_backup/main/backup.sh"
 RETAIN_DAYS=7
 
 # Цвета
@@ -58,28 +60,47 @@ load_config() {
         source "$CONFIG_FILE"
         print_msg "SUCCESS" "Конфигурация загружена"
     else
-        print_msg "INFO" "Создание новой конфигурации..."
-        
-        echo ""
-        print_msg "INFO" "Создайте бота в ${CYAN}@BotFather${RESET}"
-        read -rp "Введите Bot Token: " BOT_TOKEN
-        
-        echo ""
-        print_msg "INFO" "ID можно узнать у ${CYAN}@username_to_id_bot${RESET}"
-        read -rp "Введите Chat ID: " CHAT_ID
-        
-        echo ""
-        read -rp "Введите название контейнера БД (по умолчанию postgres): " DB_CONTAINER
-        DB_CONTAINER="${DB_CONTAINER:-postgres}"
-        
-        echo ""
-        read -rp "Введите имя пользователя БД (по умолчанию postgres): " DB_USER
-        DB_USER="${DB_USER:-postgres}"
-        
-        CRON_TIME=""
-        
-        mkdir -p "$INSTALL_DIR" "$BACKUP_DIR"
-        save_config
+        if [[ "$SCRIPT_RUN_PATH" != "$SCRIPT_PATH" ]]; then
+            print_msg "INFO" "Конфигурация не найдена. Скрипт запущен из временного расположения."
+            print_msg "INFO" "Перемещаем скрипт в основной каталог установки: ${BOLD}${SCRIPT_PATH}${RESET}..."
+            mkdir -p "$INSTALL_DIR" || { print_msg "ERROR" "Не удалось создать каталог установки ${BOLD}${INSTALL_DIR}${RESET}. Проверьте права доступа."; exit 1; }
+            mkdir -p "$BACKUP_DIR" || { print_msg "ERROR" "Не удалось создать каталог для бэкапов ${BOLD}${BACKUP_DIR}${RESET}. Проверьте права доступа."; exit 1; }
+
+            if mv "$SCRIPT_RUN_PATH" "$SCRIPT_PATH"; then
+                chmod +x "$SCRIPT_PATH"
+                clear
+                print_msg "SUCCESS" "Скрипт успешно перемещен в ${BOLD}${SCRIPT_PATH}${RESET}."
+                print_msg "INFO" "Перезапускаем скрипт из нового расположения для завершения настройки."
+                exec "$SCRIPT_PATH" "$@"
+                exit 0
+            else
+                print_msg "ERROR" "Не удалось переместить скрипт в ${BOLD}${SCRIPT_PATH}${RESET}. Проверьте права доступа."
+                exit 1
+            fi
+        else
+            print_msg "INFO" "Создание новой конфигурации..."
+            
+            echo ""
+            print_msg "INFO" "Создайте бота в ${CYAN}@BotFather${RESET}"
+            read -rp "Введите Bot Token: " BOT_TOKEN
+            
+            echo ""
+            print_msg "INFO" "ID можно узнать у ${CYAN}@username_to_id_bot${RESET}"
+            read -rp "Введите Chat ID: " CHAT_ID
+            
+            echo ""
+            read -rp "Введите название контейнера БД (по умолчанию postgres): " DB_CONTAINER
+            DB_CONTAINER="${DB_CONTAINER:-postgres}"
+            
+            echo ""
+            read -rp "Введите имя пользователя БД (по умолчанию postgres): " DB_USER
+            DB_USER="${DB_USER:-postgres}"
+            
+            CRON_TIME=""
+            
+            mkdir -p "$INSTALL_DIR" "$BACKUP_DIR"
+            save_config
+        fi
     fi
 }
 
@@ -372,6 +393,75 @@ edit_settings() {
     done
 }
 
+update_script() {
+    print_msg "INFO" "Проверка обновлений..."
+    echo ""
+    
+    if [[ "$EUID" -ne 0 ]]; then
+        print_msg "ERROR" "Требуются права root для обновления"
+        read -rp "Нажмите Enter..."
+        return
+    fi
+
+    local TEMP_SCRIPT=$(mktemp)
+    
+    if ! curl -fsSL "$SCRIPT_REPO_URL" -o "$TEMP_SCRIPT"; then
+        print_msg "ERROR" "Не удалось загрузить обновление"
+        rm -f "$TEMP_SCRIPT"
+        read -rp "Нажмите Enter..."
+        return
+    fi
+
+    local REMOTE_VERSION=$(grep -m 1 "^VERSION=" "$TEMP_SCRIPT" | cut -d'"' -f2)
+    
+    if [[ -z "$REMOTE_VERSION" ]]; then
+        print_msg "ERROR" "Не удалось определить версию"
+        rm -f "$TEMP_SCRIPT"
+        read -rp "Нажмите Enter..."
+        return
+    fi
+
+    print_msg "INFO" "Текущая версия: ${BOLD}${YELLOW}${VERSION}${RESET}"
+    print_msg "INFO" "Доступная версия: ${BOLD}${GREEN}${REMOTE_VERSION}${RESET}"
+    echo ""
+
+    if [[ "$VERSION" == "$REMOTE_VERSION" ]]; then
+        print_msg "INFO" "У вас установлена актуальная версия"
+        rm -f "$TEMP_SCRIPT"
+        read -rp "Нажмите Enter..."
+        return
+    fi
+
+    read -rp "Обновить до версии ${BOLD}${REMOTE_VERSION}${RESET}? ${GREEN}${BOLD}Y${RESET}/${RED}${BOLD}N${RESET}: " confirm
+    echo ""
+
+    if [[ "${confirm,,}" != "y" ]]; then
+        print_msg "WARN" "Обновление отменено"
+        rm -f "$TEMP_SCRIPT"
+        read -rp "Нажмите Enter..."
+        return
+    fi
+
+    local BACKUP_SCRIPT="${SCRIPT_PATH}.bak.$(date +%s)"
+    cp "$SCRIPT_PATH" "$BACKUP_SCRIPT"
+    
+    if mv "$TEMP_SCRIPT" "$SCRIPT_PATH"; then
+        chmod +x "$SCRIPT_PATH"
+        print_msg "SUCCESS" "Скрипт обновлен до версии ${BOLD}${GREEN}${REMOTE_VERSION}${RESET}"
+        echo ""
+        print_msg "INFO" "Перезапуск скрипта..."
+        read -rp "Нажмите Enter..."
+        exec "$SCRIPT_PATH" "$@"
+        exit 0
+    else
+        print_msg "ERROR" "Ошибка обновления. Восстановление из резервной копии..."
+        mv "$BACKUP_SCRIPT" "$SCRIPT_PATH"
+        rm -f "$TEMP_SCRIPT"
+        read -rp "Нажмите Enter..."
+        return
+    fi
+}
+
 setup_symlink() {
     if [[ "$EUID" -ne 0 ]]; then
         return
@@ -398,6 +488,7 @@ main_menu() {
         echo "2. Восстановить из бэкапа"
         echo "3. Настроить автоматический бэкап"
         echo "4. Изменить настройки"
+        echo "5. Обновить скрипт"
         echo ""
         echo "0. Выход"
         echo ""
@@ -413,6 +504,7 @@ main_menu() {
             2) restore_backup ;;
             3) setup_cron ;;
             4) edit_settings ;;
+            5) update_script ;;
             0) exit 0 ;;
             *) 
                 print_msg "ERROR" "Неверный выбор"
