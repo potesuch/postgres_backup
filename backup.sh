@@ -2,7 +2,7 @@
 
 set -e
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 INSTALL_DIR="/opt/pg-backup"
 BACKUP_DIR="$INSTALL_DIR/backups"
 CONFIG_FILE="$INSTALL_DIR/config.env"
