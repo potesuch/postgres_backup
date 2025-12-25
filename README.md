@@ -8,4 +8,6 @@ curl -o ~/backup.sh https://raw.githubusercontent.com/potesuch/postgres_backup/m
 
 ## Команды:
 
-- `postgres-backup` — быстрый доступ в меню из любой точки системы
+- `pg-backup` — быстрый доступ в меню из любой точки системы
+- `pg-backup backup` — сделать бэкап вручную
+- `pg-backup restore` — восстановить бэкап
