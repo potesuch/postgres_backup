@@ -104,9 +104,9 @@ load_config() {
     fi
 }
 
-send_telegram() {
-    local msg="$1"
-    local escaped_msg=$(echo "$msg" | sed \
+escape_markdown_v2() {
+    local text="$1"
+    echo "$text" | sed \
         -e 's/\\/\\\\/g' \
         -e 's/_/\\_/g' \
         -e 's/\*/\\*/g' \
@@ -125,43 +125,28 @@ send_telegram() {
         -e 's/{/\\{/g' \
         -e 's/}/\\}/g' \
         -e 's/\./\\./g' \
-        -e 's/!/\\!/g')
-    
-    curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
-        -d chat_id="$CHAT_ID" \
-        -d text="$escaped_msg" \
-        -d parse_mode="MarkdownV2" > /dev/null
+        -e 's/!/\\!/g'
+}
+
+send_telegram() {
+    local msg="$1"
+    local escaped_msg
+    escaped_msg=$(escape_markdown_v2 "$msg")
+
+    local data_params=(-d chat_id="$CHAT_ID" -d text="$escaped_msg" -d parse_mode="MarkdownV2")
+
+    curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" "${data_params[@]}" > /dev/null
 }
 
 send_telegram_file() {
     local file="$1"
     local caption="$2"
-    local escaped_caption=$(echo "$caption" | sed \
-        -e 's/\\/\\\\/g' \
-        -e 's/_/\\_/g' \
-        -e 's/\*/\\*/g' \
-        -e 's/\[/\\[/g' \
-        -e 's/\]/\\]/g' \
-        -e 's/(/\\(/g' \
-        -e 's/)/\\)/g' \
-        -e 's/~/\\~/g' \
-        -e 's/`/\\`/g' \
-        -e 's/>/\\>/g' \
-        -e 's/#/\\#/g' \
-        -e 's/+/\\+/g' \
-        -e 's/-/\\-/g' \
-        -e 's/=/\\=/g' \
-        -e 's/|/\\|/g' \
-        -e 's/{/\\{/g' \
-        -e 's/}/\\}/g' \
-        -e 's/\./\\./g' \
-        -e 's/!/\\!/g')
-    
-    curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendDocument" \
-        -F chat_id="$CHAT_ID" \
-        -F document=@"$file" \
-        -F caption="$escaped_caption" \
-        -F parse_mode="MarkdownV2" > /dev/null
+    local escaped_caption
+    escaped_caption=$(escape_markdown_v2 "$caption")
+
+    local form_params=(-F chat_id="$CHAT_ID" -F document=@"$file" -F caption="$escaped_caption" -F parse_mode="MarkdownV2")
+
+    curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendDocument" "${form_params[@]}" > /dev/null
 }
 
 create_backup() {
@@ -187,7 +172,7 @@ create_backup() {
     
     local size=$(du -h "$backup_file" | awk '{print $1}')
     local date=$(date +'%Y-%m-%d %H:%M:%S')
-    local caption=$'💾 *Бэкап PostgreSQL*\n📦 *Контейнер:* '"$DB_CONTAINER"$'\n📏 *Размер:* '"$size"$'\n📅 *Дата:* '"$date"
+    local caption=$'💾 #backup_success\n➖➖➖➖➖➖➖➖➖\n✅ *Бэкап успешно создан*\n📦 *Контейнер:* '"$DB_CONTAINER"$'\n📏 *Размер:* '"$size"$'\n📅 *Дата:* '"$date"
     
     print_msg "INFO" "Отправка в Telegram..."
     if send_telegram_file "$backup_file" "$caption"; then
