@@ -2,7 +2,7 @@
 
 set -e
 
-VERSION="1.0.2"
+VERSION="1.0.3"
 INSTALL_DIR="/opt/pg-backup"
 BACKUP_DIR="$INSTALL_DIR/backups"
 CONFIG_FILE="$INSTALL_DIR/config.env"
@@ -109,12 +109,11 @@ escape_markdown_v2() {
     echo "$text" | sed \
         -e 's/\\/\\\\/g' \
         -e 's/_/\\_/g' \
-        -e 's/\*/\\*/g' \
         -e 's/\[/\\[/g' \
         -e 's/\]/\\]/g' \
         -e 's/(/\\(/g' \
         -e 's/)/\\)/g' \
-        -e 's/~/\\~/g' \
+        -e 's/~/\~/g' \
         -e 's/`/\\`/g' \
         -e 's/>/\\>/g' \
         -e 's/#/\\#/g' \
@@ -125,7 +124,7 @@ escape_markdown_v2() {
         -e 's/{/\\{/g' \
         -e 's/}/\\}/g' \
         -e 's/\./\\./g' \
-        -e 's/!/\\!/g'
+        -e 's/!/\!/g'
 }
 
 send_telegram() {
