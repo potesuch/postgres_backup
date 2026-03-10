@@ -2,7 +2,7 @@
 
 set -e
 
-VERSION="1.0.3"
+VERSION="1.0.4"
 INSTALL_DIR="/opt/pg-backup"
 BACKUP_DIR="$INSTALL_DIR/backups"
 CONFIG_FILE="$INSTALL_DIR/config.env"
@@ -47,6 +47,7 @@ save_config() {
     cat > "$CONFIG_FILE" <<EOF
 BOT_TOKEN="$BOT_TOKEN"
 CHAT_ID="$CHAT_ID"
+MESSAGE_THREAD_ID="$MESSAGE_THREAD_ID"
 DB_CONTAINER="$DB_CONTAINER"
 DB_USER="$DB_USER"
 CRON_TIME="$CRON_TIME"
@@ -87,6 +88,10 @@ load_config() {
             echo ""
             print_msg "INFO" "ID можно узнать у ${CYAN}@username_to_id_bot${RESET}"
             read -rp "Введите Chat ID: " CHAT_ID
+
+            echo ""
+            print_msg "INFO" "Для групп с топиками укажите Message Thread ID (или оставьте пустым)"
+            read -rp "Введите Message Thread ID (опционально): " MESSAGE_THREAD_ID
             
             echo ""
             read -rp "Введите название контейнера БД (по умолчанию postgres): " DB_CONTAINER
@@ -133,6 +138,7 @@ send_telegram() {
     escaped_msg=$(escape_markdown_v2 "$msg")
 
     local data_params=(-d chat_id="$CHAT_ID" -d text="$escaped_msg" -d parse_mode="MarkdownV2")
+    [[ -n "$MESSAGE_THREAD_ID" ]] && data_params+=(-d message_thread_id="$MESSAGE_THREAD_ID")
 
     curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" "${data_params[@]}" > /dev/null
 }
@@ -144,6 +150,7 @@ send_telegram_file() {
     escaped_caption=$(escape_markdown_v2 "$caption")
 
     local form_params=(-F chat_id="$CHAT_ID" -F document=@"$file" -F caption="$escaped_caption" -F parse_mode="MarkdownV2")
+    [[ -n "$MESSAGE_THREAD_ID" ]] && form_params+=(-F message_thread_id="$MESSAGE_THREAD_ID")
 
     curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendDocument" "${form_params[@]}" > /dev/null
 }
@@ -338,8 +345,9 @@ edit_settings() {
         echo ""
         echo "1. Bot Token: ${BOLD}${BOT_TOKEN:0:10}...${RESET}"
         echo "2. Chat ID: ${BOLD}$CHAT_ID${RESET}"
-        echo "3. Контейнер БД: ${BOLD}$DB_CONTAINER${RESET}"
-        echo "4. Пользователь БД: ${BOLD}$DB_USER${RESET}"
+        echo "3. Message Thread ID: ${BOLD}${MESSAGE_THREAD_ID:-не задан}${RESET}"
+        echo "4. Контейнер БД: ${BOLD}$DB_CONTAINER${RESET}"
+        echo "5. Пользователь БД: ${BOLD}$DB_USER${RESET}"
         echo ""
         echo "0. Назад"
         echo ""
@@ -359,11 +367,16 @@ edit_settings() {
                 print_msg "SUCCESS" "Chat ID обновлен"
                 ;;
             3)
+                read -rp "Message Thread ID (оставьте пустым для отключения): " MESSAGE_THREAD_ID
+                save_config
+                print_msg "SUCCESS" "Message Thread ID обновлен"
+                ;;
+            4)
                 read -rp "Название контейнера: " DB_CONTAINER
                 save_config
                 print_msg "SUCCESS" "Контейнер обновлен"
                 ;;
-            4)
+            5)
                 read -rp "Имя пользователя БД: " DB_USER
                 save_config
                 print_msg "SUCCESS" "Пользователь обновлен"
